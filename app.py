@@ -417,5 +417,40 @@ def create():
 def files(job, name):
     return send_from_directory(WORK / job, name, as_attachment=(request.args.get("preview") != "1"))
 
+import os, shutil, uuid
+
+_orig_run = run
+def run(cmd, *args, **kwargs):
+    if isinstance(cmd, (list, tuple)) and len(cmd) > 0 and cmd[0] == "yt-dlp":
+        for _a in cmd:
+            if isinstance(_a, str) and _a.startswith("local://"):
+                _src = Path("work") / _a.replace("local://", "")
+                if "-o" in cmd:
+                    _out_tpl = cmd[cmd.index("-o") + 1]
+                    _dst = Path(_out_tpl.replace("%(ext)s", "mp4"))
+                    _dst.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(_src, _dst)
+                    return ""
+        _extra = [
+            "--no-check-certificates",
+            "--geo-bypass",
+            "--extractor-args", "youtube:player_client=tv_embedded,android_vr,ios,mweb",
+            "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        ]
+        cmd = ["yt-dlp"] + _extra + list(cmd[1:])
+    return _orig_run(cmd, *args, **kwargs)
+
+@app.route("/upload_source", methods=["POST"])
+def upload_source():
+    f = request.files.get("video")
+    if not f or not f.filename:
+        return jsonify({"error": "No video selected"}), 400
+    work_dir = Path("work")
+    work_dir.mkdir(parents=True, exist_ok=True)
+    fname = f"uploaded_{uuid.uuid4().hex[:10]}.mp4"
+    f.save(str(work_dir / fname))
+    return jsonify({"url": f"local://{fname}"})
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=False)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    
