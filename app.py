@@ -1,527 +1,470 @@
-import os, re, json, subprocess, shutil, uuid
+import os
+import re
+import json
+import time
+import uuid
+import shutil
+import subprocess
+import urllib.request
 from pathlib import Path
-import secrets, hmac
-from functools import wraps
-from flask import Flask, render_template, request, jsonify, send_from_directory, session, redirect, url_for, flash
-from werkzeug.security import check_password_hash
-from yt_dlp import YoutubeDL
+from flask import (
+    Flask,
+    render_template,
+    request,
+    jsonify,
+    session,
+    redirect,
+    url_for,
+    send_from_directory,
+)
+import cv2
 
-ROOT = Path(__file__).parent
-WORK = ROOT / "work"
-WORK.mkdir(exist_ok=True)
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024
+app.secret_key = os.environ.get("SECRET_KEY", "clipforge_ai_pro_secret_2026")
+app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500 MB max upload
 
-AUTH_FILE = ROOT / "auth_config.json"
-def load_auth():
-    return json.loads(AUTH_FILE.read_text(encoding="utf-8"))
+BASE_DIR = Path(__file__).resolve().parent
+WORK_DIR = BASE_DIR / "work"
+OUTPUT_DIR = BASE_DIR / "output"
+WORK_DIR.mkdir(parents=True, exist_ok=True)
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-app.secret_key = load_auth()["secret_key"]
-app.config["SESSION_COOKIE_HTTPONLY"] = True
-app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+CASCADE_PATH = BASE_DIR / "haarcascade_frontalface_default.xml"
+if not CASCADE_PATH.exists():
+    CASCADE_PATH = Path(cv2.data.haarcascades) / "haarcascade_frontalface_default.xml"
+FACE_CASCADE = cv2.CascadeClassifier(str(CASCADE_PATH))
 
-def get_csrf_token():
-    if "csrf_token" not in session:
-        session["csrf_token"] = secrets.token_hex(32)
-    return session["csrf_token"]
 
-def verify_csrf():
-    token = request.headers.get("X-CSRF-Token") or request.form.get("csrf_token") or ""
-    return bool(token) and hmac.compare_digest(token, session.get("csrf_token", ""))
-
-def login_required(f):
-    @wraps(f)
-    def wrapped(*args, **kwargs):
-        if not session.get("logged_in"):
-            if request.path.startswith("/api/"):
-                return jsonify(error="Unauthorized. Please log in."), 401
-            return redirect(url_for("login"))
-        return f(*args, **kwargs)
-    return wrapped
-
-@app.route("/login", methods=["GET", "POST"])
-def login():
-    if session.get("logged_in"):
-        return redirect(url_for("home"))
-    if request.method == "POST":
-        if not verify_csrf():
-            flash("Invalid CSRF token. Please try again.")
-            return redirect(url_for("login"))
-        auth = load_auth()
-        u = request.form.get("username", "").strip()
-        p_in = request.form.get("password", "")
-        if hmac.compare_digest(u, auth["username"]) and check_password_hash(auth["password_hash"], p_in):
-            session.clear()
-            session["logged_in"] = True
-            session["username"] = u
-            get_csrf_token()
-            return redirect(url_for("home"))
-        flash("Invalid username or password.")
-        return redirect(url_for("login"))
-    return render_template("login.html", csrf_token=get_csrf_token())
-
-@app.route("/logout", methods=["POST"])
-@login_required
-def logout():
-    if not verify_csrf():
-        return jsonify(error="Invalid CSRF token."), 403
-    session.clear()
-    return redirect(url_for("login"))
-
-def run(cmd):
-    p = subprocess.run(cmd, capture_output=True, text=True)
-    if p.returncode:
-        raise RuntimeError((p.stderr or p.stdout)[-2500:])
-    return p.stdout
-
-def get_duration(path):
-    out = run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
-               "-of", "default=noprint_wrappers=1:nokey=1", str(path)])
-    return float(out.strip())
-
-def download_video(url, folder):
-    opts = {
-        "format": "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
-        "outtmpl": str(folder / "source.%(ext)s"),
-        "noplaylist": True,
-        "quiet": True,
-        "no_warnings": True,
-        "merge_output_format": "mp4",
-    }
-    with YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-    vid = info.get("id") or ""
-    if vid:
-        (folder / "video_id.txt").write_text(vid, encoding="utf-8")
-    # Safely fetch subtitles separately so 429 never breaks video download
+def load_users():
+    cfg_path = BASE_DIR / "auth_config.json"
+    if not cfg_path.exists():
+        return {"admin": "admin123"}
     try:
-        sub_opts = {
-            "skip_download": True,
-            "writesubtitles": True,
-            "writeautomaticsub": True,
-            "subtitleslangs": ["en", "hi"],
-            "subtitlesformat": "vtt",
-            "outtmpl": str(folder / "source.%(ext)s"),
-            "noplaylist": True,
-            "quiet": True,
-            "no_warnings": True,
-            "ignoreerrors": True,
-            "sleep_interval_subtitles": 2,
-        }
-        with YoutubeDL(sub_opts) as sydl:
-            sydl.download([url])
+        data = json.loads(cfg_path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            if "username" in data and "password" in data:
+                return {str(data["username"]): str(data["password"])}
+            if "users" in data:
+                u = data["users"]
+                if isinstance(u, dict):
+                    return {str(k): str(v) for k, v in u.items()}
+                if isinstance(u, list):
+                    res = {}
+                    for item in u:
+                        if isinstance(item, dict) and "username" in item and "password" in item:
+                            res[str(item["username"])] = str(item["password"])
+                    if res:
+                        return res
+            simple = {str(k): str(v) for k, v in data.items() if isinstance(v, (str, int))}
+            if simple:
+                return simple
     except Exception:
         pass
-    candidates = list(folder.glob("source.*"))
-    candidates = [p for p in candidates if p.suffix.lower() in [".mp4", ".mkv", ".webm", ".mov"]]
-    if not candidates:
-        raise RuntimeError("Video download nahi mila. Link public/accessible hai ya nahi check karein.")
-    return candidates[0], info.get("title", "YouTube video")
+    return {"admin": "admin123"}
 
-def make_segments(duration, count, clip_len):
-    # Fallback when optional speech transcription is unavailable.
-    count = max(1, min(int(count), 10))
-    clip_len = max(15, min(int(clip_len), 90))
-    if duration <= clip_len:
-        return [(0, duration)]
-    step = max(clip_len, (duration - clip_len) / max(1, count - 1))
-    starts = [min(i * step, duration - clip_len) for i in range(count)]
-    return [(s, min(s + clip_len, duration)) for s in starts]
 
-def _vtt_to_sec(t):
-    parts = t.replace(",", ".").split(":")
-    if len(parts) == 3:
-        return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
-    return int(parts[0]) * 60 + float(parts[1])
+def cleanup_old_files(max_age_sec=3600):
+    now = time.time()
+    for folder in (WORK_DIR, OUTPUT_DIR):
+        try:
+            for item in folder.iterdir():
+                if now - item.stat().st_mtime > max_age_sec:
+                    if item.is_dir():
+                        shutil.rmtree(item, ignore_errors=True)
+                    else:
+                        item.unlink(missing_ok=True)
+        except Exception:
+            pass
 
-def parse_vtt_subtitles(folder):
-    vtts = sorted(folder.glob("source*.vtt"))
-    if not vtts:
-        return []
-    raw = vtts[0].read_text(encoding="utf-8", errors="ignore")
-    rows = []
-    blocks = re.split(r"\n\s*\n", raw)
-    last_text = ""
-    for b in blocks:
-        m = re.search(r"(\d{1,2}:\d{2}:\d{2}[.,]\d{3}|\d{2}:\d{2}[.,]\d{3})\s*-->\s*(\d{1,2}:\d{2}:\d{2}[.,]\d{3}|\d{2}:\d{2}[.,]\d{3})", b)
-        if not m:
+
+def run_cmd(cmd, timeout=300):
+    proc = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=timeout,
+    )
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "Command failed").strip()
+        raise RuntimeError(err[-600:])
+    return proc.stdout
+
+
+def extract_video_id(url):
+    m = re.search(r"(?:v=|youtu\.be/|shorts/|embed/)([0-9A-Za-z_-]{11})", url or "")
+    return m.group(1) if m else None
+
+
+def fallback_piped_download(url, out_mp4):
+    vid = extract_video_id(url)
+    if not vid:
+        return False
+    apis = [
+        f"https://pipedapi.kavin.rocks/streams/{vid}",
+        f"https://pipedapi.adminforge.de/streams/{vid}",
+        f"https://api.piped.private.coffee/streams/{vid}",
+        f"https://pipedapi.r4fo.com/streams/{vid}",
+    ]
+    for api in apis:
+        try:
+            req = urllib.request.Request(api, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=12) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            v_streams = [s for s in data.get("videoStreams", []) if "mp4" in s.get("mimeType", "")]
+            a_streams = [
+                s for s in data.get("audioStreams", [])
+                if "mp4" in s.get("mimeType", "") or "m4a" in s.get("mimeType", "")
+            ]
+            prog = [s for s in v_streams if not s.get("videoOnly")]
+            out_mp4.parent.mkdir(parents=True, exist_ok=True)
+            if prog:
+                best = sorted(
+                    prog,
+                    key=lambda x: int(re.sub(r"\D", "", str(x.get("quality", "0"))) or 0),
+                    reverse=True,
+                )[0]
+                run_cmd(["ffmpeg", "-y", "-i", best["url"], "-c", "copy", str(out_mp4)], timeout=180)
+                if out_mp4.exists() and out_mp4.stat().st_size > 50000:
+                    return True
+            elif v_streams and a_streams:
+                v_best = sorted(
+                    v_streams,
+                    key=lambda x: int(re.sub(r"\D", "", str(x.get("quality", "0"))) or 0),
+                    reverse=True,
+                )[0]
+                a_best = sorted(a_streams, key=lambda x: int(x.get("bitrate", 0)), reverse=True)[0]
+                run_cmd(
+                    ["ffmpeg", "-y", "-i", v_best["url"], "-i", a_best["url"], "-c", "copy", str(out_mp4)],
+                    timeout=180,
+                )
+                if out_mp4.exists() and out_mp4.stat().st_size > 50000:
+                    return True
+        except Exception:
             continue
-        s = _vtt_to_sec(m.group(1))
-        e = _vtt_to_sec(m.group(2))
-        lines = b.splitlines()
-        txt_lines = [ln for ln in lines if "-->" not in ln and not ln.strip().isdigit() and not ln.startswith("WEBVTT")]
-        txt = " ".join(txt_lines)
-        txt = re.sub(r"<[^>]+>", "", txt)
-        txt = re.sub(r"\s+", " ", txt).strip()
-        if txt and txt != last_text and e > s:
-            rows.append({"start": s, "end": e, "text": txt})
-            last_text = txt
-    return rows
+    return False
 
-def fetch_yt_api_transcript(folder):
-    vid_file = folder / "video_id.txt"
-    if not vid_file.exists():
-        return []
-    vid = vid_file.read_text(encoding="utf-8").strip()
+
+def download_source_video(url, job_dir):
+    out_mp4 = job_dir / "source.mp4"
+    if url.startswith("local://"):
+        src = WORK_DIR / url.replace("local://", "").strip()
+        if not src.exists():
+            raise RuntimeError("Uploaded video nahi mili — kripya dobara upload karein.")
+        shutil.copy2(src, out_mp4)
+        return out_mp4
+
+    extra_args = [
+        "--no-check-certificates",
+        "--geo-bypass",
+        "--no-playlist",
+        "--extractor-args",
+        "youtube:player_client=tv_embedded,android_vr,ios,mweb",
+        "--user-agent",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    ]
+    ck_env = os.environ.get("YOUTUBE_COOKIES", "").strip()
+    if ck_env:
+        ck_path = Path("/tmp/yt_cookies.txt")
+        ck_path.write_text(ck_env, encoding="utf-8")
+        extra_args.extend(["--cookies", str(ck_path)])
+
+    cmd = [
+        "yt-dlp",
+        *extra_args,
+        "-f",
+        "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best",
+        "--merge-output-format",
+        "mp4",
+        "-o",
+        str(out_mp4),
+        url,
+    ]
+    try:
+        run_cmd(cmd, timeout=240)
+        if out_mp4.exists() and out_mp4.stat().st_size > 50000:
+            return out_mp4
+    except Exception as e:
+        if fallback_piped_download(url, out_mp4):
+            return out_mp4
+        raise RuntimeError(
+            f"YouTube cloud server block: {str(e)[:180]} | Neeche 'Phone Se Video Upload Karein (MP4)' button se video select karein!"
+        )
+    return out_mp4
+
+
+def get_video_info(video_path):
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=width,height,duration",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "json",
+        str(video_path),
+    ]
+    raw = run_cmd(cmd, timeout=30)
+    info = json.loads(raw)
+    stream = (info.get("streams") or [{}])[0]
+    w = int(stream.get("width") or 1280)
+    h = int(stream.get("height") or 720)
+    dur = float(stream.get("duration") or (info.get("format") or {}).get("duration") or 60.0)
+    return w, h, max(dur, 1.0)
+
+
+def fetch_transcript_segments(url):
+    vid = extract_video_id(url)
     if not vid:
         return []
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
-        ytt = YouTubeTranscriptApi()
+        langs = ["hi", "en", "hi-IN", "en-US", "en-GB"]
         try:
-            fetched = ytt.fetch(vid, languages=["hi", "en", "en-IN", "hi-IN"])
+            api = YouTubeTranscriptApi()
+            fetched = api.fetch(vid, languages=langs)
+            return [
+                {"start": float(s.start), "duration": float(s.duration), "text": str(s.text)}
+                for s in fetched
+            ]
         except Exception:
-            tlist = ytt.list(vid)
-            fetched = next(iter(tlist)).fetch()
-        rows = []
-        for item in fetched:
-            s = float(getattr(item, "start", item.get("start", 0) if isinstance(item, dict) else 0))
-            d = float(getattr(item, "duration", item.get("duration", 1.5) if isinstance(item, dict) else 1.5))
-            txt = str(getattr(item, "text", item.get("text", "") if isinstance(item, dict) else "")).strip()
-            txt = re.sub(r"\s+", " ", txt)
-            if txt:
-                rows.append({"start": s, "end": s + max(0.3, d), "text": txt})
-        return rows
+            raw = YouTubeTranscriptApi.get_transcript(vid, languages=langs)
+            return [
+                {"start": float(s["start"]), "duration": float(s.get("duration", 2.0)), "text": str(s["text"])}
+                for s in raw
+            ]
     except Exception:
         return []
 
-def try_transcribe(video, folder):
-    api_rows = fetch_yt_api_transcript(folder)
-    if api_rows:
-        return api_rows
-    vtt_rows = parse_vtt_subtitles(folder)
-    if vtt_rows:
-        return vtt_rows
-    try:
-        from faster_whisper import WhisperModel
-        model = WhisperModel("tiny", device="cpu", compute_type="int8")
-        segments, _ = model.transcribe(str(video), vad_filter=True)
-        return [{"start": float(s.start), "end": float(s.end), "text": (s.text or "").strip()} for s in segments if (s.text or "").strip()]
-    except Exception:
-        return []
 
-def choose_highlights(transcript, duration, count, clip_len):
-    if not transcript:
-        return make_segments(duration, count, clip_len), "smart evenly-spaced fallback"
-    # Rank transcript windows by speech density + emphasis words; spread chosen clips apart.
-    windows = []
-    step = 5.0
-    t = 0.0
-    while t < duration:
-        end = min(t + clip_len, duration)
-        words = " ".join(x["text"] for x in transcript if x["start"] < end and x["end"] > t)
-        if words.strip():
-            emphasis = len(re.findall(r"\b(wow|amazing|secret|important|best|never|always|why|how|because|but|actually|mistake|surprise)\b", words.lower()))
-            density = len(words.split()) / max(1, end-t)
-            score = density + 0.35 * emphasis
-            windows.append((score, t, end))
-        t += step
-    windows.sort(reverse=True)
+def pick_clip_windows(duration, num_clips, clip_len, transcript):
+    num_clips = max(1, min(int(num_clips), 15))
+    clip_len = max(10, min(int(clip_len), 120))
+    if duration <= clip_len:
+        return [(0.0, duration)]
+
+    hooks = ("?", "!", "secret", "kaise", "kyun", "why", "how", "truth", "never", "best", "money", "paisa")
+    candidates = []
+    if transcript:
+        for seg in transcript:
+            st = seg["start"]
+            if st + clip_len <= duration:
+                txt = seg["text"].lower()
+                score = sum(2 for h in hooks if h in txt) + min(len(txt) / 20.0, 3.0)
+                candidates.append((score, st))
+        candidates.sort(key=lambda x: x[0], reverse=True)
+
     chosen = []
-    for score, start, end in windows:
-        if all(abs(start - old[0]) > clip_len * 0.75 for old in chosen):
-            chosen.append((start, end))
-        if len(chosen) >= count:
-            break
+    for _, st in candidates:
+        if all(abs(st - c) >= clip_len * 0.75 for c in chosen):
+            chosen.append(st)
+            if len(chosen) >= num_clips:
+                break
+
+    if len(chosen) < num_clips:
+        usable = max(duration - clip_len, 1.0)
+        step = usable / max(num_clips, 1)
+        for i in range(num_clips):
+            st = round(min(i * step, usable), 2)
+            if all(abs(st - c) >= clip_len * 0.5 for c in chosen):
+                chosen.append(st)
+            if len(chosen) >= num_clips:
+                break
+
     chosen.sort()
-    return chosen or make_segments(duration, count, clip_len), "transcript-ranked"
+    return [(st, min(st + clip_len, duration)) for st in chosen[:num_clips]]
 
-def _ass_time(sec):
-    sec = max(0.0, float(sec))
-    h, m, s = int(sec // 3600), int((sec % 3600) // 60), int(sec % 60)
-    cs = min(99, int(round((sec - int(sec)) * 100)))
-    return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
-def build_ass_subtitles(transcript, start, end, ass_path, caption_style="viral", layout="auto"):
-    if caption_style == "off" or not transcript:
+def build_ass_subtitles(transcript, start_t, end_t, style_name, ass_path):
+    style_key = (style_name or "off").lower().strip()
+    if style_key in ("off", "none", "") or not transcript:
         return None
-    hi_map = {"viral": "&H00FFFF&", "purple": "&HFF5C9C&", "green": "&H55FF55&", "classic": "&HFFFFFF&"}
-    hi_col = hi_map.get(caption_style, "&H00FFFF&")
+
+    palette = {
+        "yellow": ("&H0000FFFF", "&H00FFFFFF"),
+        "viral yellow": ("&H0000FFFF", "&H00FFFFFF"),
+        "purple": ("&H00FF66C4", "&H00FFFFFF"),
+        "purple pop": ("&H00FF66C4", "&H00FFFFFF"),
+        "green": ("&H0050FF50", "&H00FFFFFF"),
+        "green bold": ("&H0050FF50", "&H00FFFFFF"),
+        "white": ("&H00FFFFFF", "&H00E0E0E0"),
+        "classic white": ("&H00FFFFFF", "&H00E0E0E0"),
+    }
+    hi_color, base_color = palette.get(style_key, ("&H0000FFFF", "&H00FFFFFF"))
+
+    def fmt_ts(sec):
+        sec = max(0.0, sec)
+        h = int(sec // 3600)
+        m = int((sec % 3600) // 60)
+        s = int(sec % 60)
+        cs = int(round((sec - int(sec)) * 100))
+        if cs >= 100:
+            cs = 99
+        return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
+
+    events = []
+    for seg in transcript:
+        s0 = seg["start"]
+        s1 = s0 + max(seg.get("duration", 2.0), 0.5)
+        if s1 <= start_t or s0 >= end_t:
+            continue
+        rel0 = max(0.0, s0 - start_t)
+        rel1 = min(end_t - start_t, s1 - start_t)
+        words = [w for w in re.sub(r"\s+", " ", seg["text"]).strip().split(" ") if w]
+        if not words or rel1 <= rel0:
+            continue
+        chunks = [words[i : i + 4] for i in range(0, len(words), 4)]
+        chunk_dur = (rel1 - rel0) / len(chunks)
+        for ci, ch in enumerate(chunks):
+            c0 = rel0 + ci * chunk_dur
+            w_dur = chunk_dur / len(ch)
+            for wi in range(len(ch)):
+                w0 = c0 + wi * w_dur
+                w1 = w0 + w_dur
+                styled_words = []
+                for idx, w in enumerate(ch):
+                    clean_w = w.replace("{", "").replace("}", "").replace("\\", "")
+                    if idx == wi:
+                        styled_words.append(f"{{\\c{hi_color}\\b1}}{clean_w}{{\\c{base_color}}}")
+                    else:
+                        styled_words.append(clean_w)
+                line = " ".join(styled_words)
+                events.append(f"Dialogue: 0,{fmt_ts(w0)},{fmt_ts(w1)},Default,,0,0,0,,{line}")
+
+    if not events:
+        return None
+
     header = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: 1080
 PlayResY: 1920
+WrapStyle: 2
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,DejaVu Sans,72,&H00FFFFFF,&H0000FFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,7,2,2,60,60,420,1
+Style: Default,DejaVu Sans,68,{base_color},&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,5,2,2,60,60,280,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
-    events = []
-    for seg in transcript:
-        if seg["end"] <= start or seg["start"] >= end:
-            continue
-        s, e = max(0.0, seg["start"] - start), min(end - start, seg["end"] - start)
-        if e - s < 0.15:
-            continue
-        words = seg["text"].strip().split()
-        if not words:
-            continue
-        chunks = [words[i:i+3] for i in range(0, len(words), 3)]
-        cdur = (e - s) / len(chunks)
-        for ci, chunk in enumerate(chunks):
-            cs = s + ci * cdur
-            wdur = cdur / len(chunk)
-            for wi in range(len(chunk)):
-                ws, we = cs + wi * wdur, cs + (wi + 1) * wdur
-                parts = []
-                for idx_w, w in enumerate(chunk):
-                    cw = w.replace("{", "").replace("}", "")
-                    if caption_style != "classic":
-                        cw = cw.upper()
-                    if idx_w == wi and caption_style != "classic":
-                        parts.append(f"{{\\c{hi_col}}}{cw}{{\\c&H00FFFFFF&}}")
-                    else:
-                        parts.append(cw)
-                events.append(f"Dialogue: 0,{_ass_time(ws)},{_ass_time(we)},Default,,0,0,0,,{' '.join(parts)}")
-    if not events:
-        return None
     ass_path.write_text(header + "\n".join(events) + "\n", encoding="utf-8")
     return ass_path
 
-def build_dynamic_face_x_expr(video, start, end):
-    """Per-second face tracking: automatically snaps crop X to whichever speaker is on screen."""
-    try:
-        import cv2
-        xml = Path("haarcascade_frontalface_default.xml")
-        if not xml.exists():
-            return None
-        cascade = cv2.CascadeClassifier(str(xml))
-        cap = cv2.VideoCapture(str(video))
-        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        if w <= 0 or h <= 0:
-            cap.release()
-            return None
-        crop_w = min(w, int(h * 9 / 16))
-        dur = max(1.0, float(end - start))
-        step = 1.0
-        scale_w = 320
-        scale_h = max(180, int(h * scale_w / w))
-        scale_x = w / float(scale_w)
 
-        samples = []
-        last_x = max(0, (w - crop_w) // 2)
-        t = 0.0
-        while t < dur:
-            cap.set(cv2.CAP_PROP_POS_MSEC, (start + t + 0.25) * 1000.0)
-            ok, frame = cap.read()
-            cur_x = last_x
-            if ok:
-                small = cv2.resize(frame, (scale_w, scale_h))
-                gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-                faces = cascade.detectMultiScale(gray, 1.15, 3, minSize=(20, 20))
-                if len(faces) > 0:
-                    # Pick largest face (active speaker)
-                    fx, fy, fw, fh = max(faces, key=lambda f: f[2] * f[3])
-                    cx = (fx + fw / 2.0) * scale_x
-                    cand_x = max(0, min(w - crop_w, int(cx - crop_w / 2.0)))
-                    # Snap on camera cut, ignore tiny jitter
-                    if abs(cand_x - last_x) >= 35 or not samples:
-                        cur_x = cand_x
-                        last_x = cand_x
-            samples.append((t, cur_x))
-            t += step
-        cap.release()
+def compute_dynamic_face_crop_x(video_path, start_t, dur, src_w, src_h):
+    crop_w = min(src_w, int(round(src_h * 9.0 / 16.0)))
+    if crop_w >= src_w - 4:
+        return "0", crop_w
 
-        if not samples:
-            return None
+    max_x = max(0, src_w - crop_w)
+    center_x = max_x // 2
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        return str(center_x), crop_w
 
-        # Merge consecutive segments with same X
-        segs = []
-        for t_val, x_val in samples:
-            if not segs or segs[-1][2] != x_val:
-                segs.append([t_val, t_val + step, x_val])
-            else:
-                segs[-1][1] = t_val + step
-
-        # Build FFmpeg piecewise-constant x(t) expression
-        expr = str(segs[-1][2])
-        for seg_s, seg_e, seg_x in reversed(segs[:-1]):
-            expr = f"if(lt(t,{seg_e:.2f}),{seg_x},{expr})"
-        return {"w": crop_w, "h": h, "x_expr": expr}
-    except Exception:
-        return None
-
-def export_clip(video, start, end, out, transcript, layout="auto", caption_style="viral"):
-    duration = max(1, end - start)
-    ass_file = build_ass_subtitles(transcript, start, end, out.with_suffix(".ass"), caption_style=caption_style, layout=layout)
-    sub_filter = ""
-    if ass_file and ass_file.exists():
-        esc = str(ass_file).replace("\\", "/").replace(":", "\\:")
-        sub_filter = f",ass='{esc}'"
-
-    track = build_dynamic_face_x_expr(video, start, end)
-
-    if layout == "blur":
-        fc = (
-            "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=25:5,eq=brightness=-0.18[bg];"
-            "[0:v]scale=1080:-2[fg];"
-            f"[bg][fg]overlay=(W-w)/2:(H-h)/2{sub_filter}[v]"
-        )
-        run(["ffmpeg", "-y", "-ss", str(start), "-i", str(video), "-t", str(duration),
-             "-filter_complex", fc, "-map", "[v]", "-map", "0:a?",
-             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26", "-threads", "0",
-             "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", str(out)])
-    else:
-        # Auto-Frame & Single 9:16 both use real-time shot-by-shot face tracking
-        if track:
-            vf = f"crop={track['w']}:{track['h']}:'{track['x_expr']}':0,scale=1080:1920{sub_filter}"
+    scale = 320.0 / float(src_w)
+    xs = []
+    steps = max(1, int(dur))
+    for sec in range(steps):
+        cap.set(cv2.CAP_PROP_POS_MSEC, (start_t + sec + 0.3) * 1000.0)
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            xs.append(xs[-1] if xs else center_x)
+            continue
+        small = cv2.resize(frame, (320, max(180, int(src_h * scale))))
+        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+        faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.15, minNeighbors=4, minSize=(24, 24))
+        if len(faces) > 0:
+            fx, _, fw, _ = max(faces, key=lambda b: b[2] * b[3])
+            face_cx = (fx + fw / 2.0) / scale
+            target_x = int(max(0, min(max_x, round(face_cx - crop_w / 2.0))))
+            xs.append(target_x)
         else:
-            vf = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920" + sub_filter
-        run(["ffmpeg", "-y", "-ss", str(start), "-i", str(video), "-t", str(duration),
-             "-vf", vf, "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26", "-threads", "0",
-             "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", str(out)])
+            xs.append(xs[-1] if xs else center_x)
+    cap.release()
 
-@app.route("/")
-@login_required
-def home():
-    return render_template("index.html", csrf_token=get_csrf_token())
+    if not xs or len(set(xs)) == 1:
+        return str(xs[0] if xs else center_x), crop_w
 
-@app.route("/api/create", methods=["POST"])
-@login_required
-def create():
-    if not verify_csrf():
-        return jsonify(error="Invalid CSRF token. Refresh page and try again."), 403
-    data = request.get_json(force=True)
-    url = (data.get("url") or "").strip()
-    if not re.match(r"^https?://(www\.)?(youtube\.com|youtu\.be)/", url):
-        return jsonify(error="Valid YouTube URL enter karein."), 400
-    job = uuid.uuid4().hex[:10]
-    folder = WORK / job
-    folder.mkdir()
-    try:
-        video, title = download_video(url, folder)
-        duration = get_duration(video)
-        count = int(data.get("count", 5))
-        clip_len = int(data.get("clip_len", 35))
-        layout = data.get("layout", "auto")
-        caption_style = data.get("caption_style", "viral")
-        transcript = try_transcribe(video, folder)
-        segments, mode = choose_highlights(transcript, duration, count, clip_len)
-        outputs = []
-        for i, (start, end) in enumerate(segments, 1):
-            name = f"clip_{i:02d}.mp4"
-            export_clip(video, start, end, folder / name, transcript, layout=layout, caption_style=caption_style)
-            outputs.append({"name": name, "url": f"/files/{job}/{name}", "preview_url": f"/files/{job}/{name}?preview=1", "start": round(start), "end": round(end), "score": max(82, 98 - (i * 2)), "layout": layout})
-        return jsonify(job=job, title=title, duration=round(duration), mode=mode,
-                       transcript_available=bool(transcript), clips=outputs)
-    except Exception as e:
-        shutil.rmtree(folder, ignore_errors=True)
-        return jsonify(error=str(e)), 500
+    # Build piecewise per-second expression for FFmpeg crop filter
+    segments = []
+    seg_start = 0
+    for i in range(1, len(xs)):
+        if xs[i] != xs[seg_start]:
+            segments.append((i, xs[seg_start]))
+            seg_start = i
+    last_val = xs[seg_start]
 
-@app.route("/files/<job>/<path:name>")
-@login_required
-def files(job, name):
-    return send_from_directory(WORK / job, name, as_attachment=(request.args.get("preview") != "1"))
+    expr = str(last_val)
+    for end_sec, val in reversed(segments):
+        expr = f"if(lt(t\\,{end_sec})\\,{val}\\,{expr})"
+    return expr, crop_w
 
-import os, shutil, uuid
 
-_orig_run = run
-def run(cmd, *args, **kwargs):
-    if isinstance(cmd, (list, tuple)) and len(cmd) > 0 and cmd[0] == "yt-dlp":
-        for _a in cmd:
-            if isinstance(_a, str) and _a.startswith("local://"):
-                _src = Path("work") / _a.replace("local://", "")
-                if "-o" in cmd:
-                    _out_tpl = cmd[cmd.index("-o") + 1]
-                    _dst = Path(_out_tpl.replace("%(ext)s", "mp4"))
-                    _dst.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(_src, _dst)
-                    return ""
-        _extra = [
-            "--no-check-certificates",
-            "--geo-bypass",
-            "--extractor-args", "youtube:player_client=tv_embedded,android_vr,ios,mweb",
-            "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+def render_single_clip(video_path, start_t, end_t, layout, caption_style, transcript, out_file):
+    dur = max(1.0, end_t - start_t)
+    src_w, src_h, _ = get_video_info(video_path)
+    layout_key = (layout or "auto").lower().strip()
+
+    ass_file = out_file.with_suffix(".ass")
+    has_ass = build_ass_subtitles(transcript, start_t, end_t, caption_style, ass_file)
+
+    if "blur" in layout_key:
+        vf = (
+            "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
+            "crop=1080:1920,boxblur=20:5[bg];"
+            "[0:v]scale=1080:-2[fg];"
+            "[bg][fg]overlay=(W-w)/2:(H-h)/2"
+        )
+        if has_ass:
+            esc_ass = str(ass_file).replace("\\", "/").replace(":", "\\:")
+            vf += f",ass='{esc_ass}'"
+        vf += "[vout]"
+        cmd = [
+            "ffmpeg", "-y", "-threads", "2",
+            "-ss", f"{start_t:.2f}", "-t", f"{dur:.2f}",
+            "-i", str(video_path),
+            "-filter_complex", vf,
+            "-map", "[vout]", "-map", "0:a?",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "24",
+            "-c:a", "aac", "-b:a", "128k",
+            "-movflags", "+faststart",
+            str(out_file),
         ]
-        cmd = ["yt-dlp"] + _extra + list(cmd[1:])
-    return _orig_run(cmd, *args, **kwargs)
+    else:
+        if "single" in layout_key or "9:16" in layout_key:
+            crop_w = min(src_w, int(round(src_h * 9.0 / 16.0)))
+            x_expr = str(max(0, (src_w - crop_w) // 2))
+        else:
+            x_expr, crop_w = compute_dynamic_face_crop_x(video_path, start_t, dur, src_w, src_h)
 
-@app.route("/upload_source", methods=["POST"])
-def upload_source():
-    f = request.files.get("video")
-    if not f or not f.filename:
-        return jsonify({"error": "No video selected"}), 400
-    work_dir = Path("work")
-    work_dir.mkdir(parents=True, exist_ok=True)
-    fname = f"uploaded_{uuid.uuid4().hex[:10]}.mp4"
-    f.save(str(work_dir / fname))
-    return jsonify({"url": f"local://{fname}"})
+        vf = f"crop={crop_w}:{src_h}:{x_expr}:0,scale=1080:1920:flags=bilinear"
+        if has_ass:
+            esc_ass = str(ass_file).replace("\\", "/").replace(":", "\\:")
+            vf += f",ass='{esc_ass}'"
 
-if __name__ == "__main__":
-import os, shutil, subprocess, uuid
-from pathlib import Path
+        cmd = [
+            "ffmpeg", "-y", "-threads", "2",
+            "-ss", f"{start_t:.2f}", "-t", f"{dur:.2f}",
+            "-i", str(video_path),
+            "-vf", vf,
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "24",
+            "-c:a", "aac", "-b:a", "128k",
+            "-movflags", "+faststart",
+            str(out_file),
+        ]
 
-_orig_sp_run = subprocess.run
-def _safe_sp_run(cmd, *args, **kwargs):
-    if isinstance(cmd, (list, tuple)) and len(cmd) > 0 and cmd[0] == "yt-dlp":
-        for _a in cmd:
-            if isinstance(_a, str) and _a.startswith("local://"):
-                _src = Path("work") / _a.replace("local://", "")
-                if "-o" in cmd:
-                    _out_tpl = cmd[cmd.index("-o") + 1]
-                    _dst = Path(_out_tpl.replace("%(ext)s", "mp4"))
-                    _dst.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(_src, _dst)
-                    return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
-    return _orig_sp_run(cmd, *args, **kwargs)
-subprocess.run = _safe_sp_run
+    run_cmd(cmd, timeout=240)
+    if ass_file.exists():
+        ass_file.unlink(missing_ok=True)
 
-def _upload_local_mp4():
-    f = request.files.get("video")
-    if not f or not f.filename:
-        return jsonify({"error": "No video selected"}), 400
-    work_dir = Path("work")
-    work_dir.mkdir(parents=True, exist_ok=True)
-    fname = f"uploaded_{uuid.uuid4().hex[:10]}.mp4"
-    f.save(str(work_dir / fname))
-    return jsonify({"url": f"local://{fname}"})
-
-if "upload_local_mp4" not in app.view_functions:
-    app.add_url_rule("/upload_local_mp4", "upload_local_mp4", _upload_local_mp4, methods=["POST"])
 
 _UPLOAD_WIDGET = """
 <script>
 (function(){
   const inp = document.querySelector('input[type="text"], input[type="url"]');
-  if(!inp || document.getElementById('local-vid-up')) return;
-  const anchor = document.getElementById('yt-thumb-box') || inp;
-  const wrap = document.createElement('div');
-  wrap.innerHTML = '<div style="margin:10px 0;"><label for="local-vid-up" style="display:block;text-align:center;padding:12px;border-radius:10px;border:2px dashed #8b5cf6;background:rgba(139,92,246,0.18);color:#e9d5ff;font-weight:600;font-size:13px;cursor:pointer;">📁 Phone Se Video Upload Karein (MP4)</label><input id="local-vid-up" type="file" accept="video/*" style="display:none;"><div id="local-vid-status" style="display:none;font-size:12px;margin-top:6px;"></div></div>';
-  anchor.parentNode.insertBefore(wrap, anchor.nextSibling);
-  const fileInp = document.getElementById('local-vid-up');
-  const st = document.getElementById('local-vid-status');
-  fileInp.addEventListener('change', async function(){
-    if(!this.files || !this.files[0]) return;
-    st.style.display = 'block'; st.style.color = '#fbbf24';
-    st.textContent = '⏳ Video upload ho rahi hai, thoda rukhein...';
-    const fd = new FormData(); fd.append('video', this.files[0]);
-    try {
-      const res = await fetch('/upload_local_mp4', { method: 'POST', body: fd });
-      const data = await res.json();
-      if(data.url){
-        inp.value = data.url;
-        inp.dispatchEvent(new Event('input', { bubbles: true }));
-        st.style.color = '#34d399';
-        st.textContent = '✅ Video ready (' + this.files[0].name + ') — Ab "Get clips in 1 click" dabayein!';
-      } else { st.style.color = '#f87171'; st.textContent = '❌ Upload fail'; }
-    } catch(e) { st.style.color = '#f87171'; st.textContent = '❌ Error: ' + e.message; }
-  });
-})();
-</script>
-"""
-
-@app.after_request
-def _inject_ui(response):
-    if response.content_type and "text/html" in response.content_type:
-        html = response.get_data(as_text=True)
-        if "</body>" in html and "local-vid-up" not in html:
-            response.set_data(html.replace("</body>", _UPLOAD_WIDGET + "</body>", 1))
-    return response
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
-    
+  if(!inp
