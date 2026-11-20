@@ -365,3 +365,46 @@
 </script>
 </body>
 </html>
+<script>
+(function(){
+  const inp = document.querySelector('input[type="text"], input[type="url"]');
+  if(!inp) return;
+  const anchor = document.getElementById('yt-thumb-box') || inp;
+  const wrap = document.createElement('div');
+  wrap.innerHTML = `
+    <div style="margin-top:8px;">
+      <label for="local-vid-up" style="display:block;text-align:center;padding:10px;border-radius:10px;border:1px dashed rgba(139,92,246,0.6);background:rgba(139,92,246,0.12);color:#c4b5fd;font-size:13px;cursor:pointer;">
+        📁 Ya Phone Se Video Upload Karein (MP4)
+      </label>
+      <input id="local-vid-up" type="file" accept="video/*" style="display:none;">
+      <div id="local-vid-status" style="display:none;font-size:12px;color:#34d399;margin-top:5px;"></div>
+    </div>`;
+  anchor.parentNode.insertBefore(wrap, anchor.nextSibling);
+  const fileInp = document.getElementById('local-vid-up');
+  const st = document.getElementById('local-vid-status');
+  fileInp.addEventListener('change', async function(){
+    if(!this.files || !this.files[0]) return;
+    st.style.display = 'block';
+    st.style.color = '#fbbf24';
+    st.textContent = '⏳ Video upload ho rahi hai, thoda rukhein...';
+    const fd = new FormData();
+    fd.append('video', this.files[0]);
+    try {
+      const res = await fetch('/upload_source', { method: 'POST', body: fd });
+      const data = await res.json();
+      if(data.url){
+        inp.value = data.url;
+        inp.dispatchEvent(new Event('input', { bubbles: true }));
+        st.style.color = '#34d399';
+        st.textContent = '✅ Video ready (' + this.files[0].name + ') — Ab "Get clips in 1 click" dabayein!';
+      } else {
+        st.style.color = '#f87171';
+        st.textContent = '❌ Upload fail: ' + (data.error || 'Error');
+      }
+    } catch(e) {
+      st.style.color = '#f87171';
+      st.textContent = '❌ Upload error: ' + e.message;
+    }
+  });
+})();
+</script>
