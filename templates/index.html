@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ClipForge AI Pro — Opus Studio</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #090a12;
+      color: #f3f4f6;
+      min-height: 100vh;
+    }
+    .topbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 14px 18px;
+      background: #101222;
+      border-bottom: 1px solid #222642;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+    .brand {
+      font-size: 20px;
+      font-weight: 800;
+      letter-spacing: -0.3px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .badge-pro {
+      font-size: 11px;
+      background: linear-gradient(135deg, #7c5cff, #4f46e5);
+      color: #fff;
+      padding: 3px 8px;
+      border-radius: 999px;
+      font-weight: 700;
+    }
+    .logout-btn {
+      background: #1d2038;
+      border: 1px solid #353b63;
+      color: #e5e7eb;
+      padding: 7px 14px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .container {
+      max-width: 760px;
+      margin: 0 auto;
+      padding: 20px 14px 48px;
+    }
+    .hero {
+      background: linear-gradient(180deg, #14172b 0%, #0f1120 100%);
+      border: 1px solid #262b4d;
+      border-radius: 18px;
+      padding: 20px 16px;
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+    }
+    .hero h1 {
+      margin: 0 0 6px;
+      font-size: 22px;
+      font-weight: 800;
+    }
+    .sub {
+      margin: 0 0 16px;
+      color: #9ca3c9;
+      font-size: 14px;
+    }
+    .label {
+      display: block;
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: #a5b4fc;
+      margin: 14px 0 6px;
+    }
+    input[type="text"], select {
+      width: 100%;
+      padding: 13px 14px;
+      border-radius: 12px;
+      border: 1px solid #2e345c;
+      background: #090b15;
+      color: #fff;
+      font-size: 15px;
+      outline: none;
+    }
+    input[type="text"]:focus, select:focus {
+      border-color: #7c5cff;
+    }
+    .pill-group {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .pill-group.three {
+      grid-template-columns: 1fr 1fr 1fr;
+    }
+    .pill {
+      padding: 11px 10px;
+      border-radius: 12px;
+      border: 1px solid #2e345c;
+      background: #0d1020;
+      color: #cbd5e1;
+      text-align: center;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      user-select: none;
+    }
+    .pill.active {
+      border-color: #8b5cf6;
+      background: rgba(124, 92, 255, 0.18);
+      color: #fff;
+      box-shadow: 0 0 0 1px #8b5cf6 inset;
+    }
+    .grid-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+    .cta-btn {
+      width: 100%;
+      margin-top: 18px;
+      padding: 15px;
+      border: 0;
+      border-radius: 12px;
+      background: linear-gradient(135deg, #7c5cff, #5b46e8);
+      color: #fff;
+      font-size: 16px;
+      font-weight: 800;
+      cursor: pointer;
+    }
+    .cta-btn:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+    .status-box {
+      margin-top: 14px;
+      font-size: 14px;
+      color: #c7d2fe;
+      line-height: 1.5;
+    }
+    .results-grid {
+      margin-top: 22px;
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 16px;
+    }
+    .clip-card {
+      background: #131629;
+      border: 1px solid #272c4e;
+      border-radius: 16px;
+      padding: 14px;
+      overflow: hidden;
+    }
+    .clip-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 10px;
+      gap: 8px;
+    }
+    .score-badge {
+      background: linear-gradient(135deg, #10b981, #059669);
+      color: #fff;
+      font-size: 12px;
+      font-weight: 800;
+      padding: 4px 10px;
+      border-radius: 999px;
+    }
+    .meta-tag {
+      font-size: 12px;
+      color: #9ca3c9;
+      background: #1d213d;
+      padding: 4px 8px;
+      border-radius: 8px;
+    }
+    .clip-video {
+      width: 100%;
+      max-height: 460px;
+      border-radius: 12px;
+      background: #000;
+      display: block;
+      margin-bottom: 12px;
+    }
+    .dl-btn {
+      display: block;
+      width: 100%;
+      text-align: center;
+      text-decoration: none;
+      padding: 11px;
+      border-radius: 10px;
+      background: #222747;
+      border: 1px solid #3c4478;
+      color: #fff;
+      font-weight: 700;
+      font-size: 14px;
+    }
+    @media (min-width: 640px) {
+      .results-grid { grid-template-columns: 1fr 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">⚡ ClipForge AI <span class="badge-pro">PRO</span></div>
+    <form method="POST" action="/logout" style="margin:0;">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit" class="logout-btn">Logout</button>
+    </form>
+  </header>
+
+  <main class="container">
+    <section class="hero">
+      <h1>1 long video, 10 viral clips.</h1>
+      <p class="sub">Drop a YouTube podcast or video link. Choose layout & captions, then generate.</p>
+
+      <label class="label" for="url">YouTube Link</label>
+      <input id="url" type="text" placeholder="https://www.youtube.com/watch?v=..." />
+<div id="yt-thumb-box" style="display:none;margin-top:10px;border-radius:12px;overflow:hidden;border:1px solid rgba(139,92,246,0.4);background:#0f0f1a;">
+  <img id="yt-thumb-img" src="" alt="Video Thumbnail" style="width:100%;max-height:190px;object-fit:cover;display:block;">
+  <div style="padding:6px 10px;font-size:12px;color:#a78bfa;display:flex;align-items:center;gap:6px;">
+    <span>✅ Video Detected — Ready for Fast Clipping</span>
+  </div>
+</div>
+
+      <label class="label">Video Layout</label>
+      <div class="pill-group three" id="layout-pills">
+        <div class="pill active" data-val="auto" onclick="pick('layout', this)">✨ Auto-Frame</div>
+        <div class="pill" data-val="blur" onclick="pick('layout', this)">🎬 Blur-Frame</div>
+        <div class="pill" data-val="single" onclick="pick('layout', this)">📱 Single 9:16</div>
+      </div>
+
+      <label class="label">Caption Style</label>
+      <div class="pill-group three" id="caption-pills">
+        <div class="pill active" data-val="viral" onclick="pick('caption', this)">🔥 Viral Yellow</div>
+        <div class="pill" data-val="purple" onclick="pick('caption', this)">💜 Purple Pop</div>
+        <div class="pill" data-val="green" onclick="pick('caption', this)">💚 Green Bold</div>
+        <div class="pill" data-val="classic" onclick="pick('caption', this)">Classic White</div>
+        <div class="pill" data-val="off" onclick="pick('caption', this)">Off</div>
+      </div>
+
+      <div class="grid-2">
+        <div>
+          <label class="label" for="count">Number of Clips</label>
+          <select id="count">
+            <option value="3">3 clips</option>
+            <option value="5" selected>5 clips</option>
+            <option value="7">7 clips</option>
+            <option value="10">10 clips</option>
+          </select>
+        </div>
+        <div>
+          <label class="label" for="len">Clip Length</label>
+          <select id="len">
+            <option value="20">20 seconds</option>
+            <option value="35" selected>35 seconds</option>
+            <option value="45">45 seconds</option>
+            <option value="60">60 seconds</option>
+            <option value="90">90 seconds</option>
+          </select>
+        </div>
+      </div>
+
+      <button id="go" class="cta-btn" onclick="createClips()">⚡ Get clips in 1 click</button>
+      <div id="status" class="status-box"></div>
+    </section>
+
+    <section id="results" class="results-grid"></section>
+  </main>
+
+  <script>
+    const state = { layout: "auto", caption: "viral" };
+
+    function pick(group, el) {
+      state[group] = el.dataset.val;
+      el.parentElement.querySelectorAll(".pill").forEach(p => p.classList.remove("active"));
+      el.classList.add("active");
+    }
+
+    async function createClips() {
+      const btn = document.getElementById("go");
+      const status = document.getElementById("status");
+      const results = document.getElementById("results");
+      const url = document.getElementById("url").value.trim();
+
+      if (!url) {
+        status.textContent = "Please paste a YouTube URL first.";
+        return;
+      }
+
+      btn.disabled = true;
+      btn.textContent = "⏳ AI Processing...";
+      status.textContent = "Video download & AI clipping chal rahi hai. Bade videos mein thoda time lag sakta hai...";
+      results.innerHTML = "";
+
+      try {
+        const res = await fetch("/api/create", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-CSRF-Token": "{{ csrf_token }}"
+          },
+          body: JSON.stringify({
+            url: url,
+            count: document.getElementById("count").value,
+            clip_len: document.getElementById("len").value,
+            layout: state.layout,
+            caption_style: state.caption
+          })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Something went wrong");
+
+        status.textContent = `✅ Done: ${data.title} • Mode: ${data.mode} • Transcript: ${data.transcript_available ? "Available" : "Not available"}`;
+
+        data.clips.forEach((c, idx) => {
+          const layoutName = c.layout === "auto" ? "Auto-Frame" : (c.layout === "blur" ? "Blur-Frame" : "Single 9:16");
+          results.innerHTML += `
+            <div class="clip-card">
+              <div class="clip-head">
+                <span class="score-badge">🔥 ${c.score || 90}/100 Viral</span>
+                <span class="meta-tag">#${idx + 1} • ${layoutName} • ${c.start}s–${c.end}s</span>
+              </div>
+              <video class="clip-video" controls playsinline preload="metadata" src="${c.preview_url || c.url}"></video>
+              <a class="dl-btn" href="${c.url}">⬇️ Download MP4</a>
+            </div>
+          `;
+        });
+      } catch (e) {
+        status.textContent = "❌ Error: " + e.message;
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "⚡ Get clips in 1 click";
+      }
+    }
+  </script>
+
+<script>
+(function(){
+  const inp = document.querySelector('input[placeholder*="youtube.com"], input[type="url"], #url');
+  const box = document.getElementById('yt-thumb-box');
+  const img = document.getElementById('yt-thumb-img');
+  if(!inp || !box || !img) return;
+  function updateThumb(){
+    const val = inp.value.trim();
+    const m = val.match(/(?:v=|youtu\.be\/|shorts\/|embed\/)([A-Za-z0-9_-]{11})/);
+    if(m && m[1]){
+      img.src = 'https://img.youtube.com/vi/' + m[1] + '/hqdefault.jpg';
+      box.style.display = 'block';
+    } else {
+      box.style.display = 'none';
+    }
+  }
+  inp.addEventListener('input', updateThumb);
+  inp.addEventListener('paste', () => setTimeout(updateThumb, 50));
+})();
+</script>
+</body>
+</html>
